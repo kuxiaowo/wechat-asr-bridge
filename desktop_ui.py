@@ -182,8 +182,9 @@ def build(app):
     ttk.Button(actions, text='另存为 TXT', command=app._save_result).pack(side='left')
     footer = tk.Frame(outer, bg=c['bg'])
     footer.pack(fill='x', pady=(9, 0))
-    app._label(footer, '', 8, variable=app.detail, wrap=630, bg=c['bg']).pack(side='left')
+    app._label(footer, '', 8, variable=app.detail, wrap=470, bg=c['bg']).pack(side='left')
     ttk.Button(footer, text='运行日志', command=app._open_logs).pack(side='right')
+    ttk.Button(footer, text='诊断详情', command=app._show_diagnostics).pack(side='right', padx=(0, 8))
     app.port_box = app.settings_window = None
     for key in PROVIDERS:
         draw_pool(app, key)
@@ -238,10 +239,13 @@ def show_health(app, controller, result):
     if controller is not app.controller or app.operation in ('starting', 'stopping'):
         return
     current, app.owned = result
+    app.last_health = current
     app.connected = current is not None
     failed = bool(current and (current.get('last_error') or current.get('status') != 'ok'))
-    app.status.set('最近识别失败' if failed else '本机服务运行中' if current else '服务未启动')
-    app.state_label.configure(fg='#B33232' if failed else app.colors['ink'])
+    warnings = current.get('warnings', []) if current else []
+    app.status.set('最近识别失败 · 诊断详情可查看原因' if failed else
+                   '服务运行中 · 有兼容性警告' if warnings else '本机服务运行中' if current else '服务未启动')
+    app.state_label.configure(fg='#B33232' if failed else '#956100' if warnings else app.colors['ink'])
     states = {s['provider']: s for s in current.get('pools', [])} if current else {}
     for key, view in app.pool_views.items():
         data = states.get(key, {})
@@ -251,7 +255,10 @@ def show_health(app, controller, result):
     if current:
         active, queued = current.get('active_requests', 0), current.get('queued_requests', 0)
         app.pool_summary.set(f'运行 {active} · 排队 {queued}')
-        app.detail.set(str(current['last_error']) if failed else
+        error_detail = current.get('last_error_detail') or {}
+        message = error_detail.get('message') or current.get('last_error') or '服务状态异常，请打开诊断详情。'
+        app.detail.set((str(message).splitlines()[0][:80] + ' · 诊断详情') if failed else
+                       f'{len(warnings)} 条兼容性警告 · 点击诊断详情查看完整内容' if warnings else
                        '服务运行中 · model 指定后端' if app.owned else '已连接现有服务，此窗口不会停止它。')
     else:
         app.pool_summary.set('运行 0 · 排队 0')

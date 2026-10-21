@@ -8,15 +8,15 @@ A Windows desktop application and a local OpenAI-compatible audio transcription 
 
 | model | Provider | Requirements |
 |---|---|---|
-| `wechat-voice` | WeChat desktop | Logged-in WeChat 4.1.13.65 with the verified DLL and native speech capability |
-| `wetype-voice` | WeType | Verified WeType 3.0.0.34 running locally |
+| `wechat-voice` | WeChat desktop | Logged-in WeChat with native speech capability; reference build 4.1.13.65 |
+| `wetype-voice` | WeType | WeType running locally; 3.0.0.34 and 3.0.0.37 verified |
 | `doubao-voice` | Doubao web | Normal anonymous visitor initialization and access to its audio service |
 
-No browser credentials are read for Doubao. Native modules are fingerprint-checked before hooks load. Providers need not all be available at startup; failure of one route does not disable others. Client upgrades or private protocol changes may require new adaptations.
+No browser credentials are read for Doubao. Version and fingerprint differences produce warnings and do not block calls. WeType encoder addresses are resolved from function signatures. Warnings appear in JSON `warnings`, the `x-asr-warnings` header, `/health` and the desktop diagnostics viewer. Actual call failures include their message, code, underlying details and request ID. Providers need not all be available at startup; failure of one route does not disable others. Client upgrades or private protocol changes may require new adaptations.
 
 ## Desktop application
 
-Extract the entire `WeChatASRBridge-0.3.2-windows-x64-portable.zip` and run the executable. Keep `_internal` beside it. A local build is written to `dist/`; the latest published GitHub release may precede the source version.
+Extract the entire `WeChatASRBridge-0.3.3-windows-x64-portable.zip` and run the executable. Keep `_internal` beside it. A local build is written to `dist/`; the latest published GitHub release may precede the source version.
 
 The **Home** tab shows service status, independent concurrency pools, Base URL, model identifiers and a documentation button. Green squares indicate occupied slots. The **Manual transcription** tab provides model selection, file/sample selection and result copying/saving.
 
@@ -56,4 +56,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
 Offline tests cover independent routing/queues, independent per-model budgets, queue cancellation, callback ownership, encrypted settings and native DPI layout. These do not prove equivalent live upstream throughput. The packaged executable also supports `--self-test` and `--self-test-lifecycle`.
 
-See [v0.3.2 verification](docs/UI_CONCURRENCY_VERIFICATION.md) for the current validation scope. `tests/verify_unified_live.py` is opt-in and sends only repository-synthesized audio to selected providers. Long-term reliability, arbitrary concurrent load and future client versions remain unverified. The project is unaffiliated with Tencent, ByteDance and OpenAI.
+See [v0.3.3 verification](docs/VERSION_WARNING_VERIFICATION.md) for the current validation scope and [v0.3.2 verification](docs/UI_CONCURRENCY_VERIFICATION.md) for earlier checks. `tests/verify_unified_live.py` is opt-in and sends only repository-synthesized audio to selected providers. Long-term reliability, arbitrary concurrent load and future client versions remain unverified. The project is unaffiliated with Tencent, ByteDance and OpenAI.

@@ -1,4 +1,4 @@
-"""Use one verified, persistent Frida agent per Weixin process."""
+"""Use one persistent Frida agent per Weixin process; report version differences."""
 from dataclasses import dataclass
 import hashlib
 import io
@@ -15,6 +15,7 @@ import wave
 import frida
 import imageio_ffmpeg
 from app_paths import resource_dir
+from diagnostics import exception_detail
 
 ROOT = resource_dir()
 EXPECTED_SHA256 = '8f7406a8a465e851ee10eaecccb572d0e5b4e00d480c770938c714c396097b74'
@@ -23,9 +24,10 @@ log = logging.getLogger(__name__)
 
 
 class BackendError(Exception):
-    def __init__(self, message, status=503, code='wechat_unavailable', param=None):
+    def __init__(self, message, status=503, code='wechat_unavailable', param=None, *, details=None):
         super().__init__(message)
         self.status, self.code, self.param = status, code, param
+        self.details = details
 
 
 @dataclass
@@ -108,14 +110,29 @@ class WechatBackend:
         self.healthy = True
         self.last_pid = None
         self.last_error = None
+        self.last_error_detail = None
+        self.warnings = []
         self.last_success = None
         self._fingerprint = None
+        self._dll_reference_matches = None
         self._session = None
         self._script = None
         self._pid = None
         self._generation = 0
         self._unsafe_pid = None
         self._expected_detach = False
+
+    def warn(self, code, message):
+        warning = {'code': code, 'message': message}
+        with self.lock:
+            if warning in self.warnings:
+                return
+            self.warnings.append(warning)
+        log.warning('%s [%s]: %s', self.display_name, code, message)
+
+    def clear_warnings(self, code):
+        with self.lock:
+            self.warnings = [warning for warning in self.warnings if warning['code'] != code]
 
     def _agent_message(self, pid, generation, message, data):
         if message.get('type') == 'error':
@@ -153,12 +170,18 @@ class WechatBackend:
             stat = path.stat()
             key = (str(path), stat.st_size, stat.st_mtime_ns)
             if self._fingerprint == key:
-                return
-            if hashlib.sha256(path.read_bytes()).hexdigest() != EXPECTED_SHA256:
-                raise BackendError('微信 DLL 指纹不匹配，仅支持已验证的 4.1.13.65。')
+                return self._dll_reference_matches
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+            self.clear_warnings('unverified_wechat_version')
+            if actual != EXPECTED_SHA256:
+                self.warn('unverified_wechat_version',
+                          f'微信 DLL 与参考版本 4.1.13.65 不同，将继续尝试调用；'
+                          f'当前文件：{path}；SHA-256：{actual}。原生地址和对象布局可能已改变。')
             self._fingerprint = key
-        except OSError:
-            raise BackendError('无法读取微信 DLL，请检查安装路径。')
+            self._dll_reference_matches = actual == EXPECTED_SHA256
+            return self._dll_reference_matches
+        except OSError as error:
+            raise BackendError('无法读取微信 DLL，请检查安装路径。', details=exception_detail(error)) from error
 
     def _ensure_agent(self, pid):
         if pid == self._unsafe_pid:
@@ -171,7 +194,7 @@ class WechatBackend:
         session.on('detached', lambda reason, crash=None: self._agent_detached(session, pid, generation, reason, crash))
         script = None
         try:
-            # Verify the actual loaded DLL before installing native hooks.
+            # Report the actual loaded DLL; version differences do not block loading.
             metadata = session.create_script("rpc.exports.info = () => { const m=Process.getModuleByName('Weixin.dll'); return {pid:Process.id,path:m.path,base:m.base.toString(),size:m.size,arch:Process.arch}; };")
             metadata.load()
             try:
@@ -292,14 +315,16 @@ class WechatBackend:
                             self.healthy = True
                     self.lock.notify_all()
         if not cleanup.get('cleaned'):
-            raise BackendError('微信会话清理失败，已暂停后续调用。', 503, 'cleanup_failed')
+            raise BackendError('微信会话清理失败，已暂停后续调用。', 503, 'cleanup_failed',
+                               details={'cleanup': cleanup, 'failure': exception_detail(failure) if failure else None})
         if failure:
             with self.lock:
                 if self.healthy:
                     self.last_error = str(failure)
             if isinstance(failure, BackendError):
                 raise failure
-            raise BackendError('微信语音服务暂不可用，请确认已登录且 iLink/Opus 已启用。') from failure
+            raise BackendError('微信语音调用失败：' + str(failure),
+                               details=exception_detail(failure)) from failure
         errors = [e for e in result['events'] if e['event'] in ('recognition_error', 'dispatch_error')]
         finals = [e for e in result['events'] if e['event'] == 'final_result']
         if errors or not result['done'] or not finals:
@@ -308,11 +333,15 @@ class WechatBackend:
                 if self.healthy:
                     self.last_error = code
             if errors:
-                raise BackendError('微信返回识别错误。', 502, code)
+                details = [{key: event[key] for key in ('event', 'code', 'flag', 'detail', 'error')
+                            if key in event} for event in errors]
+                raise BackendError('微信返回识别错误：' + json.dumps(details, ensure_ascii=False),
+                                   502, code, details=details)
             raise BackendError('微信识别未在时限内完成。', 504, code)
         with self.lock:
             if self.healthy:
                 self.last_error = None
+                self.last_error_detail = None
             self.last_success = time.time()
         log.info('Native recognition completed: pid=%s generation=%s seconds=%.3f', pid, generation, duration)
         return Transcription(finals[-1]['text'], duration, pid, result['frames'], result['bytes'])

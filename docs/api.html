@@ -46,9 +46,10 @@ print(result.text)</code></pre><p class="hint">切换 model 即可指定其他�
     "message": "当前后端不支持流式响应。",
     "type": "invalid_request_error",
     "param": "stream",
-    "code": "invalid_request"
+    "code": "invalid_request",
+    "request_id": "req_..."
   }
-}</code></pre><table><thead><tr><th>HTTP 状态</th><th>含义</th></tr></thead><tbody><tr><td><code>400</code></td><td>缺少参数、model 不可用，或传入未实现的参数。</td></tr><tr><td><code>401</code></td><td>已启用鉴权，但 API Key 缺失或错误。</td></tr><tr><td><code>413</code></td><td>上传文件超过大小限制。</td></tr><tr><td><code>500</code></td><td>内部调用失败。结合服务状态与日志排查。</td></tr></tbody></table><p class="hint">响应头中的 <code>x-request-id</code> 可用于定位请求。上游或客户端故障还可能返回其他错误码。</p></section>
+}</code></pre><p>版本号或模块指纹不匹配只产生警告，不因此拒绝调用。JSON 响应会附带 <code>warnings</code> 数组，每项包含 <code>code</code> 和 <code>message</code>；成功与失败响应均可携带警告。JSON 和纯文本响应同时使用 <code>x-asr-warnings</code> 响应头传递 ASCII 转义的 JSON 数组，纯文本正文仍只包含识别文字。</p><p>实际调用失败时，<code>error.message</code> 提供具体原因，<code>error.code</code> 提供错误码，<code>error.details</code> 在有底层异常时提供异常类型、原生错误码或原因链。<code>error.request_id</code> 与响应头 <code>x-request-id</code> 对应。<code>/health</code> 的 <code>last_error_detail</code> 和 <code>warnings</code> 保留各后端诊断；窗口「诊断详情」可以查看并复制。</p><table><thead><tr><th>HTTP 状态</th><th>含义</th></tr></thead><tbody><tr><td><code>400</code></td><td>缺少参数、model 不可用，或传入未实现的参数。</td></tr><tr><td><code>401</code></td><td>已启用鉴权，但 API Key 缺失或错误。</td></tr><tr><td><code>413</code></td><td>上传文件超过大小限制。</td></tr><tr><td><code>500</code></td><td>内部调用失败。响应包含具体异常详情。</td></tr><tr><td><code>502 / 503 / 504</code></td><td>上游错误、客户端不可用或识别超时；查看响应中的具体原因。</td></tr></tbody></table></section>
       <section id="compatibility"><h2>兼容范围</h2><p>支持音频转写的 <code>json</code>、<code>text</code> 响应，以及 <code>stream=false</code>、<code>temperature=0</code> 两个兼容默认值。</p><p><code>language</code>、<code>prompt</code>、流式结果、逐词时间戳、字幕和说话人分离暂不支持；未实现参数会返回 <code>400</code>。</p><div class="notice">本页说明本地桥接层的接口约定。可配置并发数不等于上游已验证的稳定并发能力。</div></section>
       <footer>ASR Bridge · 本地接口参考</footer>
     </main>

@@ -40,6 +40,8 @@ class DesktopApplication:
         self.connected = False
         self.owned = False
         self.audio_path = None
+        self.last_health = None
+        self.request_diagnostics = ''
         self.started = None
         self.port = tk.StringVar(value=str(port))
         key_error = None
@@ -291,13 +293,24 @@ class DesktopApplication:
             self.result.delete('1.0', 'end')
             self.result.insert('1.0', text)
             self.result.configure(state='disabled')
-            self.result_status.set(f'识别完成 · {time.monotonic() - self.started:.1f} 秒')
+            warnings = getattr(text, 'warnings', [])
+            self.request_diagnostics = '\n'.join(
+                f"警告 [{warning.get('code', 'warning')}]：{warning.get('message', '')}" for warning in warnings)
+            if getattr(text, 'request_id', None):
+                self.request_diagnostics = '请求 ID：' + text.request_id + '\n' + self.request_diagnostics
+            suffix = f' · {len(warnings)} 条警告，点击诊断详情' if warnings else ''
+            self.result_status.set(f'识别完成 · {time.monotonic() - self.started:.1f} 秒' + suffix)
             self._update_buttons()
         def failed(message):
             self.operation = None
             self.progress.stop()
             self.progress.configure(mode='determinate', value=0)
-            self.result_status.set('识别失败：' + message)
+            self.request_diagnostics = message
+            self.result.configure(state='normal')
+            self.result.delete('1.0', 'end')
+            self.result.insert('1.0', message)
+            self.result.configure(state='disabled')
+            self.result_status.set('识别失败 · 详细原因见下方，可复制或打开诊断详情')
             self._update_buttons()
         self._work(lambda: transcribe_file(path, port, api_key, model), done, failed)
 
@@ -334,6 +347,31 @@ class DesktopApplication:
 
     def _open_logs(self):
         os.startfile(str(self.runtime))
+
+    def _diagnostic_text(self):
+        from diagnostics import format_diagnostics
+        text = format_diagnostics(self.last_health)
+        if self.request_diagnostics:
+            text = '【最近手动请求】\n' + self.request_diagnostics + '\n\n' + text
+        return text
+
+    def _show_diagnostics(self):
+        window = self.tk.Toplevel(self.root)
+        window.title('诊断详情 · 错误与警告')
+        window.geometry('780x460')
+        window.minsize(480, 280)
+        text = self._diagnostic_text()
+        self.ttk.Button(window, text='复制完整诊断', command=lambda: self._copy(text)).pack(
+            side='bottom', pady=(0, 12))
+        panel = self.tk.Frame(window)
+        panel.pack(fill='both', expand=True, padx=12, pady=12)
+        content = self.tk.Text(panel, wrap='word', font=('Microsoft YaHei UI', 10))
+        scroll = self.ttk.Scrollbar(panel, command=content.yview)
+        scroll.pack(side='right', fill='y')
+        content.configure(yscrollcommand=scroll.set)
+        content.pack(fill='both', expand=True)
+        content.insert('1.0', text)
+        content.configure(state='disabled')
 
     def _show_error(self, message):
         from tkinter import messagebox

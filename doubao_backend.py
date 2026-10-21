@@ -26,6 +26,8 @@ class DoubaoBackend:
         self.closing = False
         self.healthy = True
         self.last_error = self.last_success = self.last_completion = None
+        self.last_error_detail = None
+        self.warnings = []
 
     def transcribe(self, data):
         pcm, duration = normalize_audio(data)
@@ -37,6 +39,7 @@ class DoubaoBackend:
             result = transcribe_pcm(pcm, duration=duration)
             with self.lock:
                 self.last_error = None
+                self.last_error_detail = None
                 self.last_success = time.time()
                 self.last_completion = 'final_and_session_finished'
             return DoubaoTranscription(result.text, duration, 0, len(pcm) // 640, len(pcm))
