@@ -44,6 +44,8 @@ class BackendPool:
             'queued_requests': self.waiting,
             'status': 'ok' if backend.healthy else 'degraded',
             'last_error': backend.last_error, 'last_success': backend.last_success,
+            'last_error_detail': getattr(backend, 'last_error_detail', None),
+            'warnings': list(getattr(backend, 'warnings', [])),
             'agent_connected': backend.agent_connected, 'last_pid': backend.last_pid,
             'completion': getattr(backend, 'last_completion', None),
         }

@@ -13,8 +13,11 @@ import frida
 from app_paths import resource_dir
 from backend import BackendError, Transcription, WechatBackend, normalize_audio
 from wetype_protocol import ProtocolError, opus_packets, request, response
+from native_compat import resolve_wetype_encoder
+from diagnostics import exception_detail
 
-EXPECTED_MODULES = {
+REQUIRED_MODULES = ('wetype_update.exe', 'wetap_business.dll', 'ime_net.dll')
+REFERENCE_SHA256 = {
     'wetype_update.exe': '580ce85a6108b5883afe6f25502fe4f0ef221148372de782f49c6ab15e63a201',
     'wetap_business.dll': '4c948dec0ff9a473b98316bd9f02031c4a67e9efcd75b516edccc4dd583b2b33',
     'ime_net.dll': '69f25af3a87662c5e8060324cf13fda91c42ce44b6a3515c5b8c04ac5f9cbb02',
@@ -53,22 +56,34 @@ class WetypeBackend(WechatBackend):
         super().__init__()
         self.last_completion = None
         self._request_context = threading.local()
+        self._encoder_addresses = None
 
     def verify_modules(self, modules):
         paths = {entry['name'].lower(): Path(entry['path']) for entry in modules}
-        if not EXPECTED_MODULES.keys() <= paths.keys():
-            raise BackendError('输入法未加载必要的语音网络组件。', code='wetype_unavailable')
+        if not set(REQUIRED_MODULES) <= paths.keys():
+            missing = ', '.join(sorted(set(REQUIRED_MODULES) - paths.keys()))
+            raise BackendError('输入法未加载必要的语音网络组件：' + missing, code='wetype_unavailable')
         try:
             fingerprint = tuple((name, str(paths[name]), paths[name].stat().st_size,
-                                 paths[name].stat().st_mtime_ns) for name in EXPECTED_MODULES)
+                                 paths[name].stat().st_mtime_ns) for name in REQUIRED_MODULES)
             if self._fingerprint == fingerprint:
                 return
-            for name, expected in EXPECTED_MODULES.items():
-                if hashlib.sha256(paths[name].read_bytes()).hexdigest() != expected:
-                    raise BackendError('输入法模块指纹不匹配，仅支持已验证的 3.0.0.34。', code='unsupported_wetype_version')
+            self.clear_warnings('unverified_wetype_version')
+            for name, expected in REFERENCE_SHA256.items():
+                actual = hashlib.sha256(paths[name].read_bytes()).hexdigest()
+                if actual != expected:
+                    self.warn('unverified_wetype_version',
+                              f'输入法模块 {name} 与参考版本 3.0.0.34 不同，将继续自动定位编码函数；'
+                              f'当前文件：{paths[name]}；SHA-256：{actual}。')
+            try:
+                self._encoder_addresses = resolve_wetype_encoder(paths['wetype_update.exe'].read_bytes())
+            except ValueError as error:
+                raise BackendError('无法定位输入法编码函数：' + str(error),
+                                   code='wetype_encoder_unavailable', details=exception_detail(error)) from error
             self._fingerprint = fingerprint
         except OSError as error:
-            raise BackendError('无法读取微信输入法模块。', code='wetype_unavailable') from error
+            raise BackendError('无法读取微信输入法模块：' + str(error), code='wetype_unavailable',
+                               details=exception_detail(error)) from error
 
     def _ensure_agent(self, pid):
         if pid == self._unsafe_pid:
@@ -87,7 +102,10 @@ class WetypeBackend(WechatBackend):
                 self.verify_modules(metadata.exports_sync.modules())
             finally:
                 metadata.unload()
-            script = session.create_script((resource_dir() / 'wetype_agent.js').read_text(encoding='utf-8'))
+            source = (resource_dir() / 'wetype_agent.js').read_text(encoding='utf-8')
+            for original, resolved in self._encoder_addresses.items():
+                source = source.replace(hex(original), hex(resolved))
+            script = session.create_script(source)
             script.on('message', lambda message, data: self._agent_message(pid, generation, message, data))
             script.load()
         except Exception:
@@ -117,7 +135,9 @@ class WetypeBackend(WechatBackend):
             payload = list(request(voice_id, audio, sequence, total_bytes, end=end))
             reply = script.exports_sync.request(payload, owner) if owner else script.exports_sync.request(payload)
             if reply['code'] != 0:
-                raise BackendError('输入法语音网络请求失败。', 502, 'wetype_transport_error')
+                raise BackendError(f"输入法语音网络请求失败：原生错误码 {reply['code']}，"
+                                   f"任务 ID {reply.get('taskId', 'unknown')}。",
+                                   502, 'wetype_transport_error', details=reply.get('error'))
             return response(bytes(reply['data']), voice_id)
 
         for sequence, packet in enumerate(packets, 1):
@@ -174,8 +194,8 @@ class WetypeBackend(WechatBackend):
                 if not session.is_detached:
                     try:
                         cleanup = script.exports_sync.finalize(owner)
-                    except Exception:
-                        cleanup = {'cleaned': session.is_detached}
+                    except Exception as error:
+                        cleanup = {'cleaned': session.is_detached, 'error': exception_detail(error)}
                 with self.lock:
                     if not cleanup.get('cleaned'):
                         self.healthy = False
@@ -188,7 +208,8 @@ class WetypeBackend(WechatBackend):
                     self.lock.notify_all()
             self._request_context.owner = None
         if not cleanup.get('cleaned'):
-            raise BackendError('输入法原生回调清理未完成，已暂停后续调用。', 503, 'cleanup_failed')
+            raise BackendError('输入法原生回调清理未完成，已暂停后续调用。', 503, 'cleanup_failed',
+                               details={'cleanup': cleanup, 'failure': exception_detail(failure) if failure else None})
         if failure:
             with self.lock:
                 if self.healthy:
@@ -197,10 +218,12 @@ class WetypeBackend(WechatBackend):
                 raise failure
             if isinstance(failure, ProtocolError):
                 raise BackendError(str(failure), 502, 'wetype_protocol_error') from failure
-            raise BackendError('输入法语音服务暂不可用，请确认输入法仍在运行。', code='wetype_unavailable') from failure
+            raise BackendError('输入法语音调用失败：' + str(failure), code='wetype_unavailable',
+                               details=exception_detail(failure)) from failure
         with self.lock:
             if self.healthy:
                 self.last_error = None
+                self.last_error_detail = None
             self.last_success = time.time()
             self.last_completion = completion
         log.info('WeType recognition completed: seconds=%.3f completion=%s', duration, completion)

@@ -87,22 +87,61 @@ class ApiContractTests(unittest.TestCase):
         self.assertAlmostEqual(seconds, 6.28)
         self.assertEqual(len(pcm) % 640, 0)
 
-    def test_wrong_dll_is_rejected_before_native_hooks_load(self):
+    def test_unknown_dll_warns_but_loads_agent(self):
         bridge = WechatBackend()
-        session = MagicMock()
-        metadata = MagicMock()
-        session.create_script.return_value = metadata
+        session, metadata, agent = MagicMock(), MagicMock(), MagicMock()
+        session.is_detached = False
+        session.create_script.side_effect = [metadata, agent]
+        agent.exports_sync.recognize.return_value = {'done': True, 'events': [
+            {'event': 'final_result', 'text': '测试'}], 'frames': 1, 'bytes': 20}
+        agent.exports_sync.finalize.return_value = {'cleaned': True}
+        agent.exports_sync.dispose.return_value = {'cleaned': True}
         with tempfile.TemporaryDirectory() as directory:
             dll = Path(directory) / 'Weixin.dll'
             dll.write_bytes(b'unsupported-build')
             metadata.exports_sync.info.return_value = {'path': str(dll)}
             with patch.object(backend, 'discover_pid', return_value=123), patch.object(backend.frida, 'attach', return_value=session):
-                with self.assertRaises(BackendError) as error:
-                    bridge.transcribe(self.audio)
-        self.assertIn('指纹', str(error.exception))
-        self.assertEqual(session.create_script.call_count, 1)
+                self.assertEqual(bridge.transcribe(self.audio).text, '测试')
+                self.assertFalse(bridge.verify_dll(dll))
+                self.assertEqual(len(bridge.warnings), 1)
+                self.assertEqual(bridge.warnings[0]['code'], 'unverified_wechat_version')
+                bridge.close()
+        self.assertEqual(session.create_script.call_count, 2)
         metadata.unload.assert_called_once()
         session.detach.assert_called_once()
+
+    def test_warnings_survive_json_text_and_failure_responses(self):
+        server.backend.warn('unverified_wechat_version', '版本不同，继续尝试。')
+        with patch.object(server.backend, 'transcribe', return_value=Transcription('测试', 1, 0, 1, 1)):
+            result = self.post()
+            warning = result.json()['warnings'][0]
+            self.assertEqual(warning['message'], '版本不同，继续尝试。')
+            self.assertEqual(json.loads(result.headers['x-asr-warnings']), [warning])
+            plain = self.post({'model': 'wechat-voice', 'response_format': 'text'})
+            self.assertEqual(plain.text, '测试')
+            self.assertEqual(json.loads(plain.headers['x-asr-warnings']), [warning])
+        fault = BackendError('原生调用失败：具体异常', 502, 'native_failure', details={'native_code': 42})
+        with patch.object(server.backend, 'transcribe', side_effect=fault):
+            result = self.post()
+        self.assertEqual(result.status_code, 502)
+        self.assertEqual(result.json()['warnings'], [warning])
+        self.assertEqual(result.json()['error']['details'], {'native_code': 42})
+        self.assertEqual(result.json()['error']['request_id'], result.headers['x-request-id'])
+        state = self.client.get('/health').json()
+        self.assertEqual(state['last_error_detail']['code'], 'native_failure')
+        self.assertIn('具体异常', state['last_error_detail']['message'])
+        self.assertEqual(state['warnings'], [warning])
+
+    def test_unexpected_exception_is_visible_and_correlated(self):
+        client = TestClient(server.app, raise_server_exceptions=False)
+        with patch.object(server.backend, 'transcribe', side_effect=RuntimeError('specific native failure')):
+            result = client.post('/v1/audio/transcriptions', data={'model': 'wechat-voice'},
+                                 files={'file': ('x.wav', self.audio)})
+        self.assertEqual(result.status_code, 500)
+        error = result.json()['error']
+        self.assertIn('specific native failure', error['message'])
+        self.assertIn('RuntimeError: specific native failure', error['details'])
+        self.assertEqual(error['request_id'], result.headers['x-request-id'])
 
     def test_cleanup_failure_stops_future_native_calls(self):
         bridge = WechatBackend()

@@ -16,7 +16,7 @@ from desktop_settings import saved_port, save_port, saved_api_key, save_settings
 from bridge_config import BRIDGE_ID, validate_concurrency
 
 APP_BACKEND = BRIDGE_ID
-VERSION = '0.3.2'
+VERSION = '0.3.3'
 MAX_UPLOAD = 25 * 1024 * 1024
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
@@ -151,6 +151,14 @@ class ServiceController:
         raise RuntimeError('正在等待识别和会话清理完成；服务未被强行终止。')
 
 
+class TranscriptionText(str):
+    def __new__(cls, text, *, warnings=None, request_id=None):
+        result = super().__new__(cls, text)
+        result.warnings = warnings or []
+        result.request_id = request_id
+        return result
+
+
 def transcribe_file(path, port=8765, api_key='wechat-local', model='wechat-voice'):
     import httpx
     path = Path(path)
@@ -165,16 +173,31 @@ def transcribe_file(path, port=8765, api_key='wechat-local', model='wechat-voice
                                    files={'file': (path.name, audio, 'application/octet-stream')},
                                    headers={'Authorization': 'Bearer ' + (api_key or 'wechat-local')})
     except httpx.TimeoutException as error:
-        raise RuntimeError('等待识别超时；已提交的请求仍可能完成，请查看服务状态。') from error
+        raise RuntimeError('等待识别超时；已提交的请求仍可能完成。\n' + str(error)) from error
     except httpx.RequestError as error:
-        raise RuntimeError('无法连接本机服务，请先启动服务。') from error
+        raise RuntimeError(f'无法连接本机服务 http://127.0.0.1:{port}。\n{type(error).__name__}: {error}') from error
+    request_id = response.headers.get('x-request-id')
+    context = f'HTTP {response.status_code} · model={model}'
+    if request_id:
+        context += '\n请求 ID：' + request_id
     try:
         data = response.json()
     except ValueError as error:
-        raise RuntimeError('服务返回了无法读取的响应，请查看运行日志。') from error
+        raise RuntimeError(context + '\n服务返回非 JSON 响应：\n' + response.text[:8000]) from error
     if response.status_code != 200:
-        message = data.get('error', {}).get('message', '识别失败，请检查微信登录状态。')
+        fault = data.get('error') if isinstance(data, dict) else None
+        if isinstance(fault, dict):
+            message = f"[{fault.get('code', 'unknown')}] {fault.get('message', '服务没有提供错误说明。')}"
+            if fault.get('details') is not None:
+                message += '\n详细原因：\n' + (fault['details'] if isinstance(fault['details'], str)
+                                              else json.dumps(fault['details'], ensure_ascii=False, indent=2))
+        else:
+            message = json.dumps(data, ensure_ascii=False, indent=2)
         if response.status_code == 401:
-            message = '接口密钥不匹配，请填写启动该服务时设置的 API Key。'
-        raise RuntimeError(message)
-    return data['text']
+            message = '接口密钥不匹配，请填写启动该服务时设置的 API Key。\n' + message
+        for warning in data.get('warnings', []) if isinstance(data, dict) else []:
+            message += f"\n警告 [{warning.get('code', 'warning')}]：{warning.get('message', '')}"
+        raise RuntimeError(context + '\n' + message)
+    if not isinstance(data, dict) or not isinstance(data.get('text'), str):
+        raise RuntimeError(context + '\n成功响应缺少 text 字符串：\n' + json.dumps(data, ensure_ascii=False, indent=2))
+    return TranscriptionText(data['text'], warnings=data.get('warnings', []), request_id=request_id)

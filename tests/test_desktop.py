@@ -221,6 +221,58 @@ class DesktopLifetimeTests(unittest.TestCase):
 
 
 class DesktopTranscriptionTests(unittest.TestCase):
+    def test_full_error_http_status_code_and_request_id_are_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / 'test.wav'
+            audio.write_bytes(b'audio')
+            payload = {'error': {'message': '原生调用失败', 'code': 'native_failure',
+                                 'details': 'access violation at function encoder'},
+                       'warnings': [{'code': 'unverified_wetype_version', 'message': '输入法版本已变化'}]}
+            client = httpx.Client(transport=httpx.MockTransport(lambda request:
+                httpx.Response(503, json=payload, headers={'x-request-id': 'req_visible'})))
+            with patch.object(httpx, 'Client', return_value=client):
+                with self.assertRaises(RuntimeError) as error:
+                    transcribe_file(audio, model='wetype-voice')
+            for value in ('HTTP 503', 'native_failure', 'req_visible', 'access violation', '输入法版本已变化'):
+                self.assertIn(value, str(error.exception))
+
+    def test_non_json_error_body_is_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / 'test.wav'
+            audio.write_bytes(b'audio')
+            client = httpx.Client(transport=httpx.MockTransport(lambda request:
+                httpx.Response(502, text='upstream connection refused')))
+            with patch.object(httpx, 'Client', return_value=client):
+                with self.assertRaisesRegex(RuntimeError, 'upstream connection refused'):
+                    transcribe_file(audio)
+
+    def test_success_retains_warnings_without_changing_transcription_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / 'test.wav'
+            audio.write_bytes(b'audio')
+            warnings = [{'code': 'unverified_wetype_version', 'message': '继续尝试'}]
+            client = httpx.Client(transport=httpx.MockTransport(lambda request:
+                httpx.Response(200, json={'text': '识别文字', 'warnings': warnings})))
+            with patch.object(httpx, 'Client', return_value=client):
+                result = transcribe_file(audio)
+            self.assertEqual(result, '识别文字')
+            self.assertEqual(result.warnings, warnings)
+
+    def test_manual_failure_appears_in_copyable_result_area(self):
+        app = DesktopApplication.__new__(DesktopApplication)
+        app.controller, app.api_key, app.auth_enabled, app.model = Mock(), Mock(), Mock(), Mock()
+        app.audio_path = Path('test.wav')
+        app.result_status, app.result, app.progress, app._update_buttons = Mock(), Mock(), Mock(), Mock()
+        app.last_health = None
+        message = 'HTTP 503\n[native_failure] 具体错误\n请求 ID：req_visible'
+        def work(action, done, failed):
+            failed(message)
+        app._work = work
+        app._recognize()
+        app.result.insert.assert_called_once_with('1.0', message)
+        self.assertEqual(app.request_diagnostics, message)
+        self.assertIn('req_visible', app._diagnostic_text())
+
     def test_audio_response_and_authentication_errors(self):
         with tempfile.TemporaryDirectory() as directory:
             audio = Path(directory) / 'sample.wav'

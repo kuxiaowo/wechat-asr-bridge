@@ -10,6 +10,8 @@ on:
       - 'agent.js'
       - 'packaging/**'
       - 'backend.py'
+      - 'diagnostics.py'
+      - 'native_compat.py'
       - 'bridge*.py'
       - 'doubao_backend.py'
       - 'wetype*.py'

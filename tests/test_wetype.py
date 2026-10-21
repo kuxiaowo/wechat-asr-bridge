@@ -1,4 +1,4 @@
-"""WeType protocol, fail-closed version checks and native ownership tests."""
+"""WeType protocol, native compatibility checks and ownership tests."""
 from pathlib import Path
 import struct
 import gc
@@ -9,7 +9,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from backend import BackendError
-from wetype_backend import EXPECTED_MODULES, WetypeBackend
+from wetype_backend import REQUIRED_MODULES, WetypeBackend
+from native_compat import WETYPE_ENCODER_SIGNATURES, resolve_wetype_encoder
 from wetype_protocol import ProtocolError, blob, fields, integer, opus_packets, request, response, value
 import wetype_backend
 import server
@@ -58,6 +59,37 @@ class WireTests(unittest.TestCase):
                 response(data, 'id')
 
 
+class EncoderCompatibilityTests(unittest.TestCase):
+    def executable(self, rva=0x2000, *, duplicate=False, executable=True):
+        code = b'\xcc' * 32
+        expected = {}
+        for original, signature in WETYPE_ENCODER_SIGNATURES.items():
+            expected[original] = rva + len(code)
+            code += signature + b'\xcc' * 32
+        if duplicate:
+            code += next(iter(WETYPE_ENCODER_SIGNATURES.values()))
+        data = bytearray(0x200) + code
+        data[:2] = b'MZ'
+        struct.pack_into('<I', data, 0x3c, 0x80)
+        data[0x80:0x84] = b'PE\0\0'
+        struct.pack_into('<HH', data, 0x84, 0x8664, 1)
+        struct.pack_into('<H', data, 0x94, 0xf0)
+        struct.pack_into('<IIII', data, 0x190, len(code), rva, len(code), 0x200)
+        struct.pack_into('<I', data, 0x1ac, 0x20000000 if executable else 0)
+        return bytes(data), expected
+
+    def test_addresses_follow_relocated_code(self):
+        for rva in (0x2000, 0x5000):
+            data, expected = self.executable(rva)
+            self.assertEqual(resolve_wetype_encoder(data), expected)
+
+    def test_rejects_ambiguous_missing_and_nonexecutable_matches(self):
+        for data in (self.executable(duplicate=True)[0], self.executable(executable=False)[0],
+                     self.executable()[0][:-40], b'unknown executable'):
+            with self.assertRaises(ValueError):
+                resolve_wetype_encoder(data)
+
+
 class WetypeLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.bridge = WetypeBackend()
@@ -67,13 +99,13 @@ class WetypeLifecycleTests(unittest.TestCase):
         self.agent.exports_sync.finalize.return_value = {'cleaned': True}
         self.agent.exports_sync.dispose.return_value = {'cleaned': True}
 
-    def test_wrong_version_does_not_load_native_agent(self):
+    def test_incompatible_code_does_not_load_native_agent(self):
         bridge = WetypeBackend()
         session, metadata = MagicMock(), MagicMock()
         session.create_script.return_value = metadata
         with tempfile.TemporaryDirectory() as directory:
             modules = []
-            for name in EXPECTED_MODULES:
+            for name in REQUIRED_MODULES:
                 path = Path(directory) / name
                 path.write_bytes(b'unknown build')
                 modules.append({'name': name, 'path': str(path)})
@@ -81,10 +113,25 @@ class WetypeLifecycleTests(unittest.TestCase):
             with patch.object(wetype_backend.frida, 'attach', return_value=session):
                 with self.assertRaises(BackendError) as error:
                     bridge._ensure_agent(123)
-        self.assertEqual(error.exception.code, 'unsupported_wetype_version')
+        self.assertEqual(error.exception.code, 'wetype_encoder_unavailable')
         self.assertEqual(session.create_script.call_count, 1)
         metadata.unload.assert_called_once()
         session.detach.assert_called_once()
+
+    def test_changed_modules_warn_and_resolve_relocated_functions(self):
+        data, expected = EncoderCompatibilityTests().executable(0x5000)
+        bridge = WetypeBackend()
+        with tempfile.TemporaryDirectory() as directory:
+            modules = []
+            for name in REQUIRED_MODULES:
+                path = Path(directory) / name
+                path.write_bytes(data if name.endswith('.exe') else b'changed transport')
+                modules.append({'name': name, 'path': str(path)})
+            bridge.verify_modules(modules)
+            bridge.verify_modules(modules)
+        self.assertEqual(bridge._encoder_addresses, expected)
+        self.assertEqual(len(bridge.warnings), 3)
+        self.assertTrue(all(w['code'] == 'unverified_wetype_version' for w in bridge.warnings))
 
     def test_cleanup_failure_retains_callback_and_stops_new_calls(self):
         self.agent.exports_sync.finalize.return_value = {'cleaned': False}

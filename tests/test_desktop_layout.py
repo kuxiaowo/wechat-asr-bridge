@@ -12,6 +12,36 @@ from desktop_verify import inspect_layout
 
 @unittest.skipUnless(sys.platform == 'win32', 'Native Windows Tk layout')
 class DesktopLayoutTests(unittest.TestCase):
+    def test_diagnostics_remain_readable_and_copy_button_is_visible(self):
+        import tkinter as tk
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            root = tk.Tk()
+            try:
+                with patch.object(desktop, 'runtime_dir', return_value=runtime), \
+                        patch.object(desktop, 'ServiceController', side_effect=lambda port: ServiceController(port, runtime=runtime)), \
+                        patch.object(desktop, 'health', return_value=None):
+                    app = desktop.DesktopApplication(root)
+                message = 'HTTP 503\n原生错误 [native_failure]\nRuntimeError: specific failure\n请求 ID：req_visible'
+                app.request_diagnostics = message
+                app._show_diagnostics()
+                window = next(child for child in root.winfo_children() if isinstance(child, tk.Toplevel))
+                button = next(child for child in window.winfo_children() if isinstance(child, app.ttk.Button))
+                for size in ('480x280', '780x460'):
+                    window.geometry(size)
+                    root.update()
+                    self.assertTrue(button.winfo_ismapped())
+                    self.assertGreaterEqual(button.winfo_height(), button.winfo_reqheight())
+                    self.assertLessEqual(button.winfo_y() + button.winfo_height(), window.winfo_height())
+                    panel = next(child for child in window.winfo_children() if isinstance(child, tk.Frame))
+                    content = next(child for child in panel.winfo_children() if isinstance(child, tk.Text))
+                    self.assertIn(message, content.get('1.0', 'end-1c'))
+                app.closed = True
+            finally:
+                for timer in root.tk.call('after', 'info'):
+                    root.after_cancel(timer)
+                root.destroy()
+
     def test_controls_fit_at_minimum_size_with_selected_audio_and_scaled_fonts(self):
         import tkinter as tk
         for dpi in (96, 120, 144, 192):

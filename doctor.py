@@ -22,9 +22,11 @@ def main():
         session = frida.attach(pid)
         script = session.create_script("rpc.exports.path = () => Process.getModuleByName('Weixin.dll').path;")
         script.load()
-        WechatBackend().verify_dll(Path(script.exports_sync.path()))
-        checks.update(wechat_process_found=True, dll_fingerprint_matches=True)
-        print(json.dumps({'ok': True, 'checks': checks, 'note': '诊断通过不代表已经提交识别请求；请继续运行 example_openai.py。'}, ensure_ascii=False, indent=2))
+        bridge = WechatBackend()
+        matches = bridge.verify_dll(Path(script.exports_sync.path()))
+        checks.update(wechat_process_found=True, dll_fingerprint_matches=matches)
+        print(json.dumps({'ok': True, 'checks': checks, 'warnings': bridge.warnings,
+                          'note': '版本或指纹不匹配只产生警告；诊断通过不代表原生调用已兼容。'}, ensure_ascii=False, indent=2))
         return 0
     except Exception as error:
         print(json.dumps({'ok': False, 'checks': checks, 'error': str(error)}, ensure_ascii=False, indent=2))

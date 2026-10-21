@@ -1,8 +1,10 @@
 """Local ASR bridge with independent WeChat, WeType and Doubao routes."""
 import argparse
 import hmac
+import json
 import logging
 import os
+import sys
 import time
 import uuid
 import threading
@@ -20,10 +22,13 @@ from backend import BackendError, MAX_BYTES, WechatBackend
 from app_paths import runtime_dir, resource_dir
 from bridge_config import BRIDGE_ID, PROVIDERS, validate_concurrency
 from bridge_pool import BackendPool
+from diagnostics import exception_detail
+
+log = logging.getLogger(__name__)
 
 MODELS = ('wechat-voice',)
 MODEL_CREATED = int(time.time())
-app = FastAPI(title='ASR Bridge', version='0.3.2', docs_url=None, redoc_url=None)
+app = FastAPI(title='ASR Bridge', version='0.3.3', docs_url=None, redoc_url=None)
 backend = WechatBackend()
 MAX_CONCURRENCY = 4
 gate = anyio.Semaphore(MAX_CONCURRENCY)
@@ -36,9 +41,25 @@ async def documentation():
     return FileResponse(resource_dir() / 'docs' / 'api.html', media_type='text/html')
 
 
-def error_response(message, status=400, code='invalid_request', param=None):
+def warning_headers(warnings):
+    return {'x-asr-warnings': json.dumps(warnings, ensure_ascii=True, separators=(',', ':'))} if warnings else {}
+
+
+def error_response(message, status=400, code='invalid_request', param=None, *, details=None,
+                   request_id=None, warnings=None):
     kind = 'server_error' if status >= 500 else ('authentication_error' if status == 401 else 'invalid_request_error')
-    return JSONResponse({'error': {'message': message, 'type': kind, 'param': param, 'code': code}}, status_code=status)
+    error = {'message': message, 'type': kind, 'param': param, 'code': code}
+    if details is not None:
+        error['details'] = details
+    if request_id:
+        error['request_id'] = request_id
+    body = {'error': error}
+    if warnings:
+        body['warnings'] = warnings
+    headers = warning_headers(warnings)
+    if request_id:
+        headers['x-request-id'] = request_id
+    return JSONResponse(body, status_code=status, headers=headers)
 
 
 @app.middleware('http')
@@ -58,7 +79,22 @@ async def metadata_auth(request, call_next):
 
 @app.exception_handler(BackendError)
 async def backend_error(request, error):
-    return error_response(str(error), error.status, error.code, error.param)
+    return report_error(request, error)
+
+
+def report_error(request, error):
+    request_id = getattr(request.state, 'request_id', None)
+    selected = getattr(request.state, 'asr_backend', None)
+    warnings = list(getattr(selected, 'warnings', []))
+    if selected is not None:
+        with selected.lock:
+            selected.last_error = str(error)
+            selected.last_error_detail = {'message': str(error), 'code': error.code,
+                                          'details': error.details, 'request_id': request_id}
+    log.error('ASR request failed: request_id=%s code=%s message=%s details=%s',
+              request_id, error.code, error, error.details)
+    return error_response(str(error), error.status, error.code, error.param, details=error.details,
+                          request_id=request_id, warnings=warnings)
 
 
 @app.exception_handler(HTTPException)
@@ -73,7 +109,10 @@ async def validation_error(request, error):
 
 @app.exception_handler(Exception)
 async def unexpected_error(request, error):
-    return error_response('内部调用失败，请查看服务状态并确认目标客户端仍在运行。', 500, 'internal_error')
+    log.error('Unhandled ASR error: request_id=%s', getattr(request.state, 'request_id', None),
+              exc_info=(type(error), error, error.__traceback__))
+    return report_error(request, BackendError('内部调用失败：' + str(error), 500, 'internal_error',
+                                             details=exception_detail(error)))
 
 
 def model_object(name):
@@ -109,6 +148,8 @@ async def health():
                 'busy': any(s['active_requests'] for s in states), 'pools': states,
                 'formats': ['json', 'text'], 'max_audio_seconds': None,
                 'last_error': next((s['last_error'] for s in states if s['last_error']), None),
+                'last_error_detail': next((s['last_error_detail'] for s in states if s['last_error_detail']), None),
+                'warnings': [warning for state in states for warning in state['warnings']],
                 'note': '健康检查不验证客户端登录或上游服务当前可用性'}
     return {'status': 'ok' if backend.healthy else 'degraded', 'busy': gate.value < MAX_CONCURRENCY,
             'active_requests': MAX_CONCURRENCY - gate.value, 'max_concurrency': MAX_CONCURRENCY,
@@ -118,6 +159,8 @@ async def health():
             'agent_generation': backend.agent_generation,
             'backend': getattr(backend, 'backend_id', 'wechat-4.1.13.65'), 'formats': ['json', 'text'],
             'max_audio_seconds': None, 'last_error': backend.last_error,
+            'last_error_detail': getattr(backend, 'last_error_detail', None),
+            'warnings': list(getattr(backend, 'warnings', [])),
             'completion': getattr(backend, 'last_completion', None),
             'note': '健康检查不等于原生识别能力验证'}
 
@@ -173,16 +216,22 @@ async def transcriptions(request: Request):
             key = next(k for k, p in PROVIDERS.items() if p['model'] == model)
             pool = pools[key]
             selected, selected_gate, selected_workers = pool.backend, pool.admit(), pool.workers
+        request.state.asr_backend = selected
         async with selected_gate:
             with anyio.CancelScope(shield=True):
                 result = await anyio.to_thread.run_sync(selected.transcribe, data, abandon_on_cancel=False, limiter=selected_workers)
         headers = {'x-wechat-audio-seconds': str(result.duration), 'x-wechat-session-cleaned': 'true'}
         headers['x-asr-backend'] = getattr(selected, 'backend_id', 'wechat-4.1.13.65')
+        warnings = list(getattr(selected, 'warnings', []))
+        headers.update(warning_headers(warnings))
         if hasattr(result, 'completion'):
             headers['x-asr-completion'] = result.completion
         if fmt == 'text':
             return PlainTextResponse(result.text, headers=headers)
-        return JSONResponse({'text': result.text}, headers=headers)
+        body = {'text': result.text}
+        if warnings:
+            body['warnings'] = warnings
+        return JSONResponse(body, headers=headers)
 
 
 def configure_backend(name, concurrency=None):
@@ -220,6 +269,9 @@ def configure_backend(name, concurrency=None):
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8765)

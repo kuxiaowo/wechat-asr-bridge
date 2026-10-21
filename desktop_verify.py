@@ -16,7 +16,7 @@ def inspect_layout(app):
     app.root.update()
     app.root.update_idletasks()
     wanted = {'启动服务', '停止服务', '复制地址', '打开接口文档',
-              '设置', '运行日志', '选择音频', '使用示例音频',
+              '设置', '运行日志', '诊断详情', '选择音频', '使用示例音频',
               '开始识别', '复制文字', '另存为 TXT'}
     results = []
     def walk(widget):

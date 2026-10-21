@@ -6,7 +6,7 @@
 
 ## 窗口版
 
-使用与源码版本对应的 `WeChatASRBridge-0.3.2-windows-x64-portable.zip`，解压整个文件夹并运行 `WeChatASRBridge.exe`。本地构建产物在 `dist/`；GitHub Releases 的最新正式发布版本可能早于当前源码。
+使用与源码版本对应的 `WeChatASRBridge-0.3.3-windows-x64-portable.zip`，解压整个文件夹并运行 `WeChatASRBridge.exe`。本地构建产物在 `dist/`；GitHub Releases 的最新正式发布版本可能早于当前源码。
 
 - **首页**：服务状态、三个独立并发池、Base URL、model 和接口文档入口。每个小格代表一个并发名额，占用显示绿色，空闲无填色。
 - **手动转写**：选择 model、选择音频或示例音频、识别、复制或保存文字。
@@ -19,11 +19,13 @@
 
 | model | 后端 | 条件 |
 |---|---|---|
-| `wechat-voice` | 微信桌面端 | 微信 4.1.13.65 已登录，账号的 iLink/Opus 能力可用 |
-| `wetype-voice` | 微信输入法 | 已验证的微信输入法 3.0.0.34 正在运行 |
+| `wechat-voice` | 微信桌面端 | 微信已登录，账号的 iLink/Opus 能力可用；参考版本 4.1.13.65 |
+| `wetype-voice` | 微信输入法 | 输入法正在运行；已验证 3.0.0.34、3.0.0.37 |
 | `doubao-voice` | 豆包网页版匿名会话 | 能正常访问豆包网页及语音网关，无需浏览器登录 |
 
-微信和输入法执行已适配模块的指纹核验，版本不匹配时拒绝原生调用；不需要同时满足所有后端的运行条件才能启动应用。某个后端不可用时，其他后端仍可使用。豆包使用普通游客初始化，不读取 Chrome/Edge 登录信息，也不保存浏览器 Cookie。
+微信和输入法的版本或模块指纹不匹配只产生警告，不再据此拒绝调用。输入法按函数特征自动定位编码器。警告可在响应 JSON 的 `warnings`、`x-asr-warnings` 响应头、`/health` 和窗口「诊断详情」中查看。某个后端不可用时，其他后端仍可使用。豆包使用普通游客初始化，不读取 Chrome/Edge 登录信息，也不保存浏览器 Cookie。
+
+实际调用失败仍返回对应 HTTP 错误码，并包含具体 `error.message`、`error.code`、底层异常 `error.details` 和请求 ID。窗口的手动转写结果区显示完整错误，首页「诊断详情」可查看并复制后台请求的错误与警告。
 
 原生客户端与私有网页协议可能变化，当前实现不能保证任意版本或长期稳定运行。自定义并发数不会提高上游限额。大并发池的格子分组显示，显示分页不会减少实际配置容量。
 
@@ -91,6 +93,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
 既有微信专项验证仍在 `tests/verify_live.py`、`verify_long.py`、`verify_stability.py`；默认并发假设为单后端微信模式。输入法和豆包协议的背景及历史验证见 [WETYPE.md](docs/WETYPE.md)、[豆包实验记录](experiments/doubao_asr/VERIFICATION.md)。
 
-本轮验证见 [v0.3.2 界面与调度验证](docs/UI_CONCURRENCY_VERIFICATION.md)。上一版构建、离线测试和真实请求的历史验证范围见 [v0.3.0 整合验证记录](docs/UNIFIED_VERIFICATION.md)。
+本轮验证见 [v0.3.3 版本警告与错误诊断验证](docs/VERSION_WARNING_VERIFICATION.md)。历史验证范围见 [v0.3.2 界面与调度验证](docs/UI_CONCURRENCY_VERIFICATION.md) 和 [v0.3.0 整合验证记录](docs/UNIFIED_VERIFICATION.md)。
 
 项目与腾讯、微信、字节跳动和 OpenAI 无隶属关系。

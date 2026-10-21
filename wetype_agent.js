@@ -1,5 +1,5 @@
 'use strict';
-// Version/hash validation happens in Python before this agent is loaded.
+// Python resolves these encoder addresses from unique executable signatures.
 const targetModule = Process.getModuleByName('wetype_update.exe');
 const base = targetModule.base;
 function native(rva, ret, args) {
