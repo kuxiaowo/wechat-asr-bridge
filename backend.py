@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -55,7 +56,8 @@ def discover_pid():
     try:
         output = subprocess.run(
             ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command],
-            capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW,
+            capture_output=True, timeout=10,
+            **({'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}),
         )
         ids = json.loads(output.stdout.decode('utf-8-sig'))
     except (OSError, ValueError, subprocess.TimeoutExpired):
@@ -89,7 +91,7 @@ def normalize_audio(data):
              '-nostdin', '-protocol_whitelist', 'pipe', '-i', 'pipe:0', '-vn',
              '-ac', '1', '-ar', '16000', '-f', 's16le', 'pipe:1'],
             input=data, capture_output=True, timeout=20,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            **({'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}),
         )
     except (OSError, subprocess.TimeoutExpired, RuntimeError):
         raise BackendError('音频解码失败或超时。', 400, 'invalid_audio', 'file')
